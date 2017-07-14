@@ -36,7 +36,19 @@ type (
 	// SliceIndex is an index operation on a slice or array at some index Key.
 	SliceIndex interface {
 		PathStep
-		Key() int
+		Key() int // May return -1 if in a split state
+
+		// SplitKeys returns the indexes for indexing into slices in the
+		// x and y values, respectively. These indexes may differ due to the
+		// insertion or removal of an element in one of the slices, causing
+		// all of the indexes to be shifted. If an index is -1, then that
+		// indicates that the element does not exist in the associated slice.
+		//
+		// Key is guaranteed to return -1 if and only if the indexes returned
+		// by SplitKeys are not the same. SplitKeys will never return -1 for
+		// both indexes.
+		SplitKeys() (x int, y int)
+
 		isSliceIndex()
 	}
 	// MapIndex is an index operation on a map at some index Key.
@@ -163,7 +175,7 @@ type (
 
 	sliceIndex struct {
 		pathStep
-		key int
+		xkey, ykey int
 	}
 	mapIndex struct {
 		pathStep
@@ -202,22 +214,39 @@ func (ps pathStep) String() string {
 	if s == "" || strings.ContainsAny(s, "{}\n") {
 		return "root" // Type too simple or complex to print
 	}
-	return fmt.Sprintf("{%s}", s)
+	return "{" + s + "}"
 }
 
-func (si sliceIndex) String() string    { return fmt.Sprintf("[%d]", si.key) }
+func (si sliceIndex) String() string {
+	switch {
+	case si.xkey == si.ykey:
+		return fmt.Sprintf("[%d]", si.xkey)
+	case si.ykey == -1:
+		return fmt.Sprintf("[%d|_]", si.xkey)
+	case si.xkey == -1:
+		return fmt.Sprintf("[_|%d]", si.ykey)
+	default:
+		return fmt.Sprintf("[%d|%d]", si.xkey, si.ykey)
+	}
+}
 func (mi mapIndex) String() string      { return fmt.Sprintf("[%#v]", mi.key) }
 func (ta typeAssertion) String() string { return fmt.Sprintf(".(%v)", ta.typ) }
 func (sf structField) String() string   { return fmt.Sprintf(".%s", sf.name) }
 func (in indirect) String() string      { return "*" }
 func (tf transform) String() string     { return fmt.Sprintf("%s()", tf.trans.name) }
 
-func (si sliceIndex) Key() int           { return si.key }
-func (mi mapIndex) Key() reflect.Value   { return mi.key }
-func (sf structField) Name() string      { return sf.name }
-func (sf structField) Index() int        { return sf.idx }
-func (tf transform) Name() string        { return tf.trans.name }
-func (tf transform) Func() reflect.Value { return tf.trans.fnc }
+func (si sliceIndex) Key() int {
+	if si.xkey != si.ykey {
+		return -1
+	}
+	return si.xkey
+}
+func (si sliceIndex) SplitKeys() (x, y int) { return si.xkey, si.ykey }
+func (mi mapIndex) Key() reflect.Value      { return mi.key }
+func (sf structField) Name() string         { return sf.name }
+func (sf structField) Index() int           { return sf.idx }
+func (tf transform) Name() string           { return tf.trans.name }
+func (tf transform) Func() reflect.Value    { return tf.trans.fnc }
 
 func (pathStep) isPathStep()           {}
 func (sliceIndex) isSliceIndex()       {}

@@ -147,6 +147,7 @@ func ExampleOption_equalEmpty() {
 	// false
 }
 
+
 // Two slices may be considered equal if they have the same elements,
 // regardless of the order that they appear in. Transformations can be used
 // to sort the slice.
@@ -264,3 +265,4 @@ func ExampleOption_transformComplex() {
 	// false
 	// false
 }
+

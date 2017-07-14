@@ -28,6 +28,8 @@ package cmp
 import (
 	"fmt"
 	"reflect"
+
+	"github.com/google/go-cmp/cmp/internal/diff"
 )
 
 // BUG: Maps with keys containing NaN values cannot be properly compared due to
@@ -77,7 +79,7 @@ import (
 func Equal(x, y interface{}, opts ...Option) bool {
 	s := newState(opts)
 	s.compareAny(reflect.ValueOf(x), reflect.ValueOf(y))
-	return s.eq
+	return s.result.Equal()
 }
 
 // Diff returns a human-readable report of the differences between two values.
@@ -99,8 +101,8 @@ func Diff(x, y interface{}, opts ...Option) string {
 }
 
 type state struct {
-	eq      bool // Current result of comparison
-	curPath Path // The current path in the value tree
+	result  diff.Result // The current result of comparison
+	curPath Path        // The current path in the value tree
 
 	// dsCheck tracks the state needed to periodically perform checks that
 	// user provided func(T, T) bool functions are symmetric and deterministic.
@@ -121,7 +123,7 @@ type state struct {
 }
 
 func newState(opts []Option) *state {
-	s := &state{eq: true}
+	s := new(state)
 	for _, opt := range opts {
 		s.processOption(opt)
 	}
@@ -182,6 +184,7 @@ func (s *state) compareAny(vx, vy reflect.Value) {
 	t := vx.Type()
 	if len(s.curPath) == 0 {
 		s.curPath.push(&pathStep{typ: t})
+		defer s.curPath.pop()
 	}
 
 	// Rule 1: Check whether an option applies on this node in the value tree.
@@ -375,29 +378,52 @@ func (s *state) callFunc(f, x, y reflect.Value) bool {
 }
 
 func (s *state) compareArray(vx, vy reflect.Value, t reflect.Type) {
-	step := &sliceIndex{pathStep{t.Elem()}, 0}
+	step := &sliceIndex{pathStep{t.Elem()}, 0, 0}
 	s.curPath.push(step)
-	defer s.curPath.pop()
 
-	// Regardless of the lengths, we always try to compare the elements.
-	// If one slice is longer, we will report the elements of the longer
-	// slice as different (relative to an invalid reflect.Value).
-	nmin := vx.Len()
-	if nmin > vy.Len() {
-		nmin = vy.Len()
+	// Compute an edit-script for slices vx and vy.
+	oldResult, oldReporter := s.result, s.reporter
+	s.reporter = nil // Remove reporter to avoid spurious printouts
+	eq, es := diff.Difference(vx.Len(), vy.Len(), func(ix, iy int) diff.Result {
+		step.xkey, step.ykey = ix, iy
+		s.result = diff.Result{} // Reset result
+		s.compareAny(vx.Index(ix), vy.Index(iy))
+		return s.result
+	})
+	s.result, s.reporter = oldResult, oldReporter
+
+	// Equal or no edit-script, so report entire slices as is.
+	if eq || es == nil {
+		s.curPath.pop()
+		s.report(eq, vx, vy)
+		return
 	}
-	for i := 0; i < nmin; i++ {
-		step.key = i
-		s.compareAny(vx.Index(i), vy.Index(i))
+
+	// Replay the edit-script.
+	var ix, iy int
+	for _, e := range es {
+		switch e {
+		case diff.UniqueX:
+			step.xkey, step.ykey = ix, -1
+			s.report(false, vx.Index(ix), reflect.Value{})
+			ix++
+		case diff.UniqueY:
+			step.xkey, step.ykey = -1, iy
+			s.report(false, reflect.Value{}, vy.Index(iy))
+			iy++
+		default:
+			step.xkey, step.ykey = ix, iy
+			if e == diff.Identity {
+				s.report(true, vx.Index(ix), vy.Index(iy))
+			} else {
+				s.compareAny(vx.Index(ix), vy.Index(iy))
+			}
+			ix++
+			iy++
+		}
 	}
-	for i := nmin; i < vx.Len(); i++ {
-		step.key = i
-		s.report(false, vx.Index(i), reflect.Value{})
-	}
-	for i := nmin; i < vy.Len(); i++ {
-		step.key = i
-		s.report(false, reflect.Value{}, vy.Index(i))
-	}
+	s.curPath.pop()
+	return
 }
 
 func (s *state) compareMap(vx, vy reflect.Value, t reflect.Type) {
@@ -467,7 +493,11 @@ func (s *state) compareStruct(vx, vy reflect.Value, t reflect.Type) {
 // report records the result of a single comparison.
 // It also calls Report if any reporter is registered.
 func (s *state) report(eq bool, vx, vy reflect.Value) {
-	s.eq = s.eq && eq
+	if eq {
+		s.result.NSame++
+	} else {
+		s.result.NDiff++
+	}
 	if s.reporter != nil {
 		s.reporter.Report(vx, vy, eq, s.curPath)
 	}
